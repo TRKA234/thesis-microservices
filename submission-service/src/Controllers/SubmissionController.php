@@ -95,20 +95,40 @@ class SubmissionController
     public function getByUser(): void
     {
         $user = $GLOBALS['auth_user'];
+        $userRole = $user['role'] ?? 'mahasiswa';
 
         try {
-            $stmt = $this->db->prepare("
-                SELECT s.*, 
-                       COUNT(m.id) as total_milestones,
-                       SUM(CASE WHEN m.status = 'acc' THEN 1 ELSE 0 END) as completed_milestones
-                FROM submissions s
-                LEFT JOIN milestones m ON s.id = m.submission_id
-                WHERE s.identity_number = :identity_number
-                GROUP BY s.id
-                ORDER BY s.created_at DESC
-            ");
-
-            $stmt->execute(['identity_number' => $user['identity_number']]);
+            // Jika dosen atau kaprodi, tampilkan semua submission
+            // Jika mahasiswa, tampilkan hanya submission mereka sendiri
+            if ($userRole === 'dosen' || $userRole === 'kaprodi') {
+                $stmt = $this->db->prepare("
+                    SELECT s.*, 
+                           COUNT(m.id) as total_milestones,
+                           SUM(CASE WHEN m.status = 'acc' THEN 1 ELSE 0 END) as completed_milestones,
+                           s.identity_number as student_identity_number,
+                           s.identity_number as student_name
+                    FROM submissions s
+                    LEFT JOIN milestones m ON s.id = m.submission_id
+                    GROUP BY s.id
+                    ORDER BY 
+                        CASE WHEN s.status = 'pengajuan' THEN 0 ELSE 1 END,
+                        s.created_at DESC
+                ");
+                $stmt->execute();
+            } else {
+                $stmt = $this->db->prepare("
+                    SELECT s.*, 
+                           COUNT(m.id) as total_milestones,
+                           SUM(CASE WHEN m.status = 'acc' THEN 1 ELSE 0 END) as completed_milestones
+                    FROM submissions s
+                    LEFT JOIN milestones m ON s.id = m.submission_id
+                    WHERE s.identity_number = :identity_number
+                    GROUP BY s.id
+                    ORDER BY s.created_at DESC
+                ");
+                $stmt->execute(['identity_number' => $user['identity_number']]);
+            }
+            
             $submissions = $stmt->fetchAll();
 
             foreach ($submissions as &$submission) {
@@ -134,17 +154,29 @@ class SubmissionController
     public function getById(int $id): void
     {
         $user = $GLOBALS['auth_user'];
+        $userRole = $user['role'] ?? 'mahasiswa';
 
         try {
-            $stmt = $this->db->prepare("
-                SELECT * FROM submissions 
-                WHERE id = :id AND identity_number = :identity_number
-            ");
+            // Jika dosen/kaprodi, bisa lihat semua submission
+            // Jika mahasiswa, hanya bisa lihat submission mereka sendiri
+            if ($userRole === 'dosen' || $userRole === 'kaprodi') {
+                $stmt = $this->db->prepare("
+                    SELECT * FROM submissions 
+                    WHERE id = :id
+                );
 
-            $stmt->execute([
-                'id' => $id,
-                'identity_number' => $user['identity_number']
-            ]);
+                $stmt->execute(['id' => $id]);
+            } else {
+                $stmt = $this->db->prepare("
+                    SELECT * FROM submissions 
+                    WHERE id = :id AND identity_number = :identity_number
+                ");
+
+                $stmt->execute([
+                    'id' => $id,
+                    'identity_number' => $user['identity_number']
+                ]);
+            }
 
             $submission = $stmt->fetch();
 
@@ -175,23 +207,43 @@ class SubmissionController
     {
         $input = json_decode(file_get_contents('php://input'), true);
         $user = $GLOBALS['auth_user'];
+        $userRole = $user['role'] ?? 'mahasiswa';
 
         try {
-            $stmt = $this->db->prepare("
-                UPDATE submissions 
-                SET title = COALESCE(:title, title),
-                    abstract = COALESCE(:abstract, abstract),
-                    status = COALESCE(:status, status)
-                WHERE id = :id AND identity_number = :identity_number
-            ");
+            // Jika dosen/kaprodi, bisa update status tanpa check identity_number
+            // Jika mahasiswa, hanya bisa update submission mereka sendiri
+            if ($userRole === 'dosen' || $userRole === 'kaprodi') {
+                $stmt = $this->db->prepare("
+                    UPDATE submissions 
+                    SET title = COALESCE(:title, title),
+                        abstract = COALESCE(:abstract, abstract),
+                        status = COALESCE(:status, status)
+                    WHERE id = :id
+                ");
 
-            $stmt->execute([
-                'id' => $id,
-                'identity_number' => $user['identity_number'],
-                'title' => $input['title'] ?? null,
-                'abstract' => $input['abstract'] ?? null,
-                'status' => $input['status'] ?? null
-            ]);
+                $stmt->execute([
+                    'id' => $id,
+                    'title' => $input['title'] ?? null,
+                    'abstract' => $input['abstract'] ?? null,
+                    'status' => $input['status'] ?? null
+                ]);
+            } else {
+                $stmt = $this->db->prepare("
+                    UPDATE submissions 
+                    SET title = COALESCE(:title, title),
+                        abstract = COALESCE(:abstract, abstract),
+                        status = COALESCE(:status, status)
+                    WHERE id = :id AND identity_number = :identity_number
+                ");
+
+                $stmt->execute([
+                    'id' => $id,
+                    'identity_number' => $user['identity_number'],
+                    'title' => $input['title'] ?? null,
+                    'abstract' => $input['abstract'] ?? null,
+                    'status' => $input['status'] ?? null
+                ]);
+            }
 
             if ($stmt->rowCount() === 0) {
                 http_response_code(404);
