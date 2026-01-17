@@ -17,7 +17,16 @@ const getChatHistory = async (req, res) => {
 // @access  Private
 const createMessage = async (req, res) => {
     try {
-        const { submission_id, sender_id, receiver_id, message, attachments } = req.body;
+        const { submission_id, receiver_id, message, attachments } = req.body;
+        
+        // AMBIL sender_id dari req.user (hasil decode JWT middleware)
+        // Jangan percaya sender_id dari body request
+        const sender_id = req.user ? req.user.identity_number : req.body.sender_id;
+
+        if (!submission_id || !message) {
+            return res.status(400).json({ success: false, message: 'Missing required fields' });
+        }
+
         const newMessage = new Message({
             submission_id,
             sender_id,
@@ -25,10 +34,11 @@ const createMessage = async (req, res) => {
             message,
             attachments,
         });
+
         const savedMessage = await newMessage.save();
         res.status(201).json({ success: true, data: savedMessage });
     } catch (error) {
-        res.status(500).json({ success: false, message: 'Server Error' });
+        res.status(500).json({ success: false, message: error.message });
     }
 };
 

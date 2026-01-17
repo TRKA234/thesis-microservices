@@ -11,11 +11,13 @@ type UserRepository interface {
 	Create(user *model.User) error
 	FindByIdentityNumber(identityNumber string) (*model.User, error)
 	FindByID(id uint) (*model.User, error)
+	FindAll() ([]model.User, error)
 }
 
 type userRepository struct {
 	db *gorm.DB
 }
+
 
 func NewUserRepository(db *gorm.DB) UserRepository {
 	return &userRepository{db: db}
@@ -47,4 +49,10 @@ func (r *userRepository) FindByID(id uint) (*model.User, error) {
 		return nil, err
 	}
 	return &user, nil
+}
+
+func (r *userRepository) FindAll() ([]model.User, error) {
+    var users []model.User
+    err := r.db.Find(&users).Error
+    return users, err
 }

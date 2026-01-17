@@ -63,6 +63,7 @@ func main() {
 	{
 		protected.GET("/profile", authHandler.GetProfile)
 		protected.GET("/verify", authHandler.VerifyToken)
+		protected.GET("/users", authHandler.GetAllUsers)
 	}
 
 	// Health check

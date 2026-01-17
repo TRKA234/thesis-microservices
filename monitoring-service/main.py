@@ -3,96 +3,133 @@ from dotenv import load_dotenv
 import os
 import redis
 import json
-import requests
 import pymysql
+from motor.motor_asyncio import AsyncIOMotorClient
+from datetime import datetime
 
+# Load environment variables
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(title="Thesis Monitoring Service")
 
-# Redis configuration
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+# --- Configuration ---
+# Redis
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_DB = 0  # Default Redis database
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
-# MySQL configuration for Submission Service data
-MYSQL_HOST = os.getenv("MYSQL_HOST")
-MYSQL_PORT = int(os.getenv("MYSQL_PORT", 3306))
-MYSQL_USER = os.getenv("MYSQL_USER")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
-MYSQL_DB = os.getenv("MYSQL_DB")
+# MySQL (Submission DB)
+MYSQL_CONFIG = {
+    "host": os.getenv("MYSQL_HOST"),
+    "port": int(os.getenv("MYSQL_PORT", 3306)),
+    "user": os.getenv("MYSQL_USER"),
+    "password": os.getenv("MYSQL_PASSWORD"),
+    "database": os.getenv("MYSQL_DB"),
+    "cursorclass": pymysql.cursors.DictCursor
+}
 
-# Other service URLs
-SUBMISSION_SERVICE_URL = os.getenv("SUBMISSION_SERVICE_URL")
+# MongoDB (Guidance DB)
+MONGO_URI = os.getenv("MONGODB_URI")
+mongo_client = AsyncIOMotorClient(MONGO_URI)
+mongo_db = mongo_client.get_default_database()
 
+# --- Health Check ---
 @app.get("/health")
 async def health_check():
     return {
         "status": "healthy",
-        "service": "monitoring-service"
+        "service": "monitoring-service",
+        "timestamp": datetime.now().isoformat()
     }
 
+# --- Statistics Logic ---
 @app.get("/stats/global")
 async def get_global_stats():
-    cache_key = "global_stats"
-    cached_stats = redis_client.get(cache_key)
-
-    if cached_stats:
-        return json.loads(cached_stats)
-
+    cache_key = "global_stats_dashboard"
+    
+    # 1. Coba ambil dari Cache Redis
     try:
-        # Fetch data from Submission Service (or directly from MySQL)
-        # For simplicity, we'll connect directly to MySQL for submission data
-        conn = pymysql.connect(
-            host=MYSQL_HOST,
-            port=MYSQL_PORT,
-            user=MYSQL_USER,
-            password=MYSQL_PASSWORD,
-            database=MYSQL_DB
-        )
-        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cached_data = redis_client.get(cache_key)
+        if cached_data:
+            stats = json.loads(cached_data)
+            stats["source"] = "cache"
+            return stats
+    except Exception as e:
+        print(f"Redis Cache Error: {e}")
 
-        # Total submissions
-        cursor.execute("SELECT COUNT(*) as total FROM submissions")
-        total_submissions = cursor.fetchone()['total']
+    # 2. Jika tidak ada di cache, hitung dari Database
+    try:
+        # --- A. Data dari MySQL (Submissions & Milestones) ---
+        conn = pymysql.connect(**MYSQL_CONFIG)
+        try:
+            with conn.cursor() as cursor:
+                # Total & Kelulusan
+                cursor.execute("""
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN status = 'lulus' THEN 1 ELSE 0 END) as graduated
+                    FROM submissions
+                """)
+                mysql_basic = cursor.fetchone()
 
-        # Submissions with status 'lulus'
-        cursor.execute("SELECT COUNT(*) as graduated FROM submissions WHERE status = 'lulus'")
-        graduated_submissions = cursor.fetchone()['graduated']
-        
-        # Calculate average completion time (dummy for now, requires more data/logic)
-        # For a real implementation, this would involve tracking submission dates and milestone completion dates
-        average_completion_time = "N/A" 
+                # Rata-rata Progress Berdasarkan Milestone (ACC)
+                cursor.execute("""
+                    SELECT 
+                        AVG(sub_progress) as avg_progress
+                    FROM (
+                        SELECT 
+                            s.id,
+                            (COUNT(CASE WHEN m.status = 'acc' THEN 1 END) * 100.0 / NULLIF(COUNT(m.id), 0)) as sub_progress
+                        FROM submissions s
+                        LEFT JOIN milestones m ON s.id = m.submission_id
+                        GROUP BY s.id
+                    ) AS progress_table
+                """)
+                mysql_progress = cursor.fetchone()
+        finally:
+            conn.close()
 
-        # Calculate total progress percentage for all submissions
-        cursor.execute("SELECT total_progress FROM submissions")
-        all_progress = cursor.fetchall()
-        total_progress_sum = sum([s['total_progress'] for s in all_progress])
-        average_progress_percentage = (total_progress_sum / len(all_progress)) if len(all_progress) > 0 else 0
+        # --- B. Data dari MongoDB (Guidance Messages) ---
+        total_messages = await mongo_db.messages.count_documents({})
 
-
+        # --- C. Gabungkan Hasil ---
         stats = {
-            "total_submissions": total_submissions,
-            "graduated_submissions": graduated_submissions,
-            "average_completion_time": average_completion_time,
-            "average_progress_percentage": round(average_progress_percentage, 2)
+            "total_submissions": mysql_basic['total'] or 0,
+            "graduated_submissions": int(mysql_basic['graduated'] or 0),
+            "average_progress_percentage": round(float(mysql_progress['avg_progress'] or 0), 2),
+            "total_guidance_messages": total_messages,
+            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
-        redis_client.setex(cache_key, 60, json.dumps(stats)) # Cache for 60 seconds
+        # 3. Simpan ke Redis (Expire dalam 60 detik)
+        try:
+            redis_client.setex(cache_key, 60, json.dumps(stats))
+        except:
+            pass
 
+        stats["source"] = "database_live"
         return stats
 
-    except pymysql.Error as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {e}")
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Error communicating with other services: {e}")
+    except pymysql.MySQLError as e:
+        raise HTTPException(status_code=500, detail=f"MySQL Error: {str(e)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
-    finally:
-        if 'conn' in locals() and conn.open:
-            conn.close()
+        raise HTTPException(status_code=500, detail=f"Internal Error: {str(e)}")
+
+# --- Detailed Stats (Optional) ---
+@app.get("/stats/submissions-status")
+async def get_status_breakdown():
+    """Melihat distribusi status pengajuan (pengajuan, disetujui, lulus, ditolak)"""
+    try:
+        conn = pymysql.connect(**MYSQL_CONFIG)
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT status, COUNT(*) as count FROM submissions GROUP BY status")
+            result = cursor.fetchall()
+        conn.close()
+        return {"success": True, "data": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8084)))
+    # Menjalankan server pada port 8084
+    uvicorn.run(app, host="0.0.0.0", port=8084)

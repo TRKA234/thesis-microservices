@@ -15,6 +15,7 @@ type AuthService interface {
 	Login(req *model.LoginRequest) (*model.AuthResponse, error)
 	ValidateToken(tokenString string) (*Claims, error)
 	GetUserByID(id uint) (*model.User, error)
+	GetAllUsers() ([]model.UserInfo, error)
 }
 
 type authService struct {
@@ -140,4 +141,22 @@ func (s *authService) ValidateToken(tokenString string) (*Claims, error) {
 
 func (s *authService) GetUserByID(id uint) (*model.User, error) {
 	return s.userRepo.FindByID(id)
+}
+
+func (s *authService) GetAllUsers() ([]model.UserInfo, error) {
+    users, err := s.userRepo.FindAll()
+    if err != nil {
+        return nil, err
+    }
+
+    var userInfos []model.UserInfo
+    for _, user := range users {
+        userInfos = append(userInfos, model.UserInfo{
+            ID:             user.ID,
+            IdentityNumber: user.IdentityNumber,
+            FullName:       user.FullName,
+            Role:           user.Role,
+        })
+    }
+    return userInfos, nil
 }

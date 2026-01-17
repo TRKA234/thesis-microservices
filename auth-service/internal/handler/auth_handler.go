@@ -115,3 +115,16 @@ func (h *AuthHandler) VerifyToken(c *gin.Context) {
 		},
 	})
 }
+
+func (h *AuthHandler) GetAllUsers(c *gin.Context) {
+    users, err := h.authService.GetAllUsers()
+    if err != nil {
+        c.JSON(500, gin.H{"error": "Failed to fetch users"})
+        return
+    }
+
+    c.JSON(200, gin.H{
+        "success": true,
+        "data":    users,
+    })
+}

@@ -28,7 +28,6 @@ class SubmissionController
             return;
         }
 
-        // Generate ticket number
         $ticketNumber = 'SKR-' . date('Ymd') . '-' . strtoupper(substr(md5(uniqid()), 0, 6));
 
         try {
@@ -48,7 +47,6 @@ class SubmissionController
 
             $submissionId = $this->db->lastInsertId();
 
-            // Create default milestones
             $milestones = [
                 'Proposal Skripsi',
                 'Bab 1 - Pendahuluan',
@@ -82,7 +80,9 @@ class SubmissionController
                 ]
             ]);
         } catch (\Exception $e) {
-            $this->db->rollBack();
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
             http_response_code(500);
             echo json_encode([
                 'success' => false,
@@ -98,15 +98,11 @@ class SubmissionController
         $userRole = $user['role'] ?? 'mahasiswa';
 
         try {
-            // Jika dosen atau kaprodi, tampilkan semua submission
-            // Jika mahasiswa, tampilkan hanya submission mereka sendiri
             if ($userRole === 'dosen' || $userRole === 'kaprodi') {
                 $stmt = $this->db->prepare("
                     SELECT s.*, 
                            COUNT(m.id) as total_milestones,
-                           SUM(CASE WHEN m.status = 'acc' THEN 1 ELSE 0 END) as completed_milestones,
-                           s.identity_number as student_identity_number,
-                           s.identity_number as student_name
+                           SUM(CASE WHEN m.status = 'acc' THEN 1 ELSE 0 END) as completed_milestones
                     FROM submissions s
                     LEFT JOIN milestones m ON s.id = m.submission_id
                     GROUP BY s.id
@@ -128,8 +124,8 @@ class SubmissionController
                 ");
                 $stmt->execute(['identity_number' => $user['identity_number']]);
             }
-            
-            $submissions = $stmt->fetchAll();
+
+            $submissions = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             foreach ($submissions as &$submission) {
                 $submission['total_progress'] = $submission['total_milestones'] > 0
@@ -157,28 +153,20 @@ class SubmissionController
         $userRole = $user['role'] ?? 'mahasiswa';
 
         try {
-            // Jika dosen/kaprodi, bisa lihat semua submission
-            // Jika mahasiswa, hanya bisa lihat submission mereka sendiri
             if ($userRole === 'dosen' || $userRole === 'kaprodi') {
-                $stmt = $this->db->prepare("
-                    SELECT * FROM submissions 
-                    WHERE id = :id
-                );
-
+                $stmt = $this->db->prepare("SELECT * FROM submissions WHERE id = :id");
                 $stmt->execute(['id' => $id]);
             } else {
                 $stmt = $this->db->prepare("
-                    SELECT * FROM submissions 
-                    WHERE id = :id AND identity_number = :identity_number
+                    SELECT * FROM submissions WHERE id = :id AND identity_number = :identity_number
                 ");
-
                 $stmt->execute([
                     'id' => $id,
                     'identity_number' => $user['identity_number']
                 ]);
             }
 
-            $submission = $stmt->fetch();
+            $submission = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if (!$submission) {
                 http_response_code(404);
@@ -210,49 +198,26 @@ class SubmissionController
         $userRole = $user['role'] ?? 'mahasiswa';
 
         try {
-            // Jika dosen/kaprodi, bisa update status tanpa check identity_number
-            // Jika mahasiswa, hanya bisa update submission mereka sendiri
-            if ($userRole === 'dosen' || $userRole === 'kaprodi') {
-                $stmt = $this->db->prepare("
-                    UPDATE submissions 
-                    SET title = COALESCE(:title, title),
-                        abstract = COALESCE(:abstract, abstract),
-                        status = COALESCE(:status, status)
-                    WHERE id = :id
-                ");
+            $sql = "UPDATE submissions SET 
+                    title = COALESCE(:title, title),
+                    abstract = COALESCE(:abstract, abstract),
+                    status = COALESCE(:status, status)
+                    WHERE id = :id";
 
-                $stmt->execute([
-                    'id' => $id,
-                    'title' => $input['title'] ?? null,
-                    'abstract' => $input['abstract'] ?? null,
-                    'status' => $input['status'] ?? null
-                ]);
-            } else {
-                $stmt = $this->db->prepare("
-                    UPDATE submissions 
-                    SET title = COALESCE(:title, title),
-                        abstract = COALESCE(:abstract, abstract),
-                        status = COALESCE(:status, status)
-                    WHERE id = :id AND identity_number = :identity_number
-                ");
+            $params = [
+                'id' => $id,
+                'title' => $input['title'] ?? null,
+                'abstract' => $input['abstract'] ?? null,
+                'status' => $input['status'] ?? null
+            ];
 
-                $stmt->execute([
-                    'id' => $id,
-                    'identity_number' => $user['identity_number'],
-                    'title' => $input['title'] ?? null,
-                    'abstract' => $input['abstract'] ?? null,
-                    'status' => $input['status'] ?? null
-                ]);
+            if ($userRole !== 'dosen' && $userRole !== 'kaprodi') {
+                $sql .= " AND identity_number = :identity_number";
+                $params['identity_number'] = $user['identity_number'];
             }
 
-            if ($stmt->rowCount() === 0) {
-                http_response_code(404);
-                echo json_encode([
-                    'success' => false,
-                    'message' => 'Submission not found or no changes made'
-                ]);
-                return;
-            }
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute($params);
 
             echo json_encode([
                 'success' => true,
